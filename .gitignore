@@ -1,0 +1,16 @@
+# Downloaded packages and compiled cache
+/elpa
+/eln-cache
+
+# Local state
+
+/.cloth/lisp/.local/
+/.cloth/var/
+
+/server/
+/transient/
+
+/.cloth/custom-file.el
+/projects
+/history
+/bookmarks

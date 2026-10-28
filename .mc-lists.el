@@ -3,6 +3,7 @@
 
 (setq mc/cmds-to-run-for-all
       '(
+        comment-line
         dired-next-line
         dired-previous-line
         duplicate-line

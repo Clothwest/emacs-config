@@ -2,108 +2,39 @@
 (require 'cl-generic)
 (require 'seq)
 
-;;; find-program
-(setq find-program
-      "d:/.devEnv_me/Git/Git/usr/bin/find.exe")
+;;; .project.eld
+;; :ignroed -> glob
+;; :included
+;; :commands [TODO]
 
-;; required-paths -> glob but from root e.g. "build/" -> "./build/"
-;; ignored-paths  -> glob               e.g. "build/" -> "build/"
-(defun cloth/project/make-config (&optional type required-paths ignored-paths)
-  (list :type type
-        :required-paths required-paths
-        :ignored-paths ignored-paths))
+;;; project patterns
+(defconst cloth/project/metadata-file-patterns
+  (list "./.project.eld"
+        "./.cloth/.project.eld"))
 
-;;; metadata-files
-(defconst cloth/project/metadata-files
-  (list "./.project*.eld"
-        "./.cloth/.project*.eld"))
+;;; project disabled patterns
+(defconst cloth/project/not-project-file-patterns
+  (list "./.not-project.eld"))
 
-;;; not-project-file
-(defconst cloth/project/not-project-files
-  (list "./.not-project*.eld"))
+;;; helper functions
 
-(defun cloth/project/make-metadata-configs ()
-  (mapcar
-   (lambda (metadata-file)
-     (cloth/project/make-config
-      'other
-      (list metadata-file)))
-   cloth/project/metadata-files))
-
-;;; configs
-(defconst cloth/project/configs
-  (append
-
-   (list
-    (cloth/project/make-config
-     'meson
-     '("./meson.build" "./build/")
-     '("./build/")))
-
-   (cloth/project/make-metadata-configs)))
-
-(defun cloth/project/path-exists (rel-path base-dir)
-   (not (null
-         (file-expand-wildcards
-          (expand-file-name rel-path base-dir)
-          t))))
-
-(defun cloth/project/paths-exists (rel-paths base-dir)
-  (and rel-paths
-       (seq-every-p
-        (lambda (path)
-          (cloth/project/path-exists path base-dir))
-        rel-paths)))
-
-(defun cloth/project/root-disabled (dir)
-  (and cloth/project/not-project-files
-       (seq-some
-        (lambda (file)
-          (cloth/project/path-exists file dir))
-        cloth/project/not-project-files)))
-
-(defun cloth/project/make-project (root config)
-  (list 'cloth-project
-        :root root
-        :config config))
-
-(defun cloth/project/matching-config (dir)
-  (unless (cloth/project/root-disabled dir)
-    (seq-find
-     (lambda (config)
-       (cloth/project/paths-exists
-        (plist-get config :required-paths)
-        dir))
-     cloth/project/configs)))
-
-(defun cloth/project/find (start-dir)
-  (let ((root
-         (locate-dominating-file
-          start-dir
-          #'cloth/project/matching-config)))
-    (when root
-      (cloth/project/make-project
-       root
-       (cloth/project/matching-config root)))))
-
-(defun cloth/project/get-root (project)
-  (plist-get (cdr project) :root))
-
-(defun cloth/project/get-config (project)
-  (plist-get (cdr project) :config))
-
-(defun cloth/project/config-ignored-paths (config)
-  (plist-get config :ignored-paths))
-
-(defun cloth/project/get-metadata-file (root)
+(defun cloth/project/find-file (patterns dir)
   (seq-some
    (lambda (pattern)
-     (seq-find
-      #'file-regular-p
-      (file-expand-wildcards
-       (expand-file-name pattern root)
-       t)))
-   cloth/project/metadata-files))
+     (seq-find #'file-regular-p
+               (file-expand-wildcards
+                (expand-file-name pattern dir))))
+   patterns))
+
+(defun cloth/project/is-root (dir)
+  (and
+   (cloth/project/find-file
+    cloth/project/metadata-file-patterns
+    dir)
+   ;; root disabled
+   (not (cloth/project/find-file
+         cloth/project/not-project-file-patterns
+         dir))))
 
 (defun cloth/project/read-metadata (file)
   (when (and file (file-regular-p file))
@@ -114,29 +45,52 @@
       (unless (eobp)
         (read (current-buffer))))))
 
-(defun cloth/project/metadata-ignored-paths (root)
-  (plist-get
-   (cloth/project/read-metadata
-    (cloth/project/get-metadata-file root))
-   :ignored-paths))
+;;; project functions
 
-;;; root
+(defun cloth/project/find-project (start-dir)
+  (let ((root
+         (locate-dominating-file
+          start-dir
+          (lambda (dir)
+            (or (cloth/project/is-root dir)
+                (file-directory-p
+                 (expand-file-name ".git" dir)))))))
+    (when (and root (cloth/project/is-root root))
+      (list 'cloth-project
+            :root
+            (expand-file-name root)
+            :metadata
+            (cloth/project/read-metadata
+             (cloth/project/find-file
+              cloth/project/metadata-file-patterns
+              (expand-file-name root)))))))
+
 (cl-defmethod project-root ((project (head cloth-project)))
-  (cloth/project/get-root project))
-
-;;; ignores
-
-(cl-defmethod project-ignores :around (project _dir)
-  (append (cloth/project/metadata-ignored-paths (project-root project))
-          (cl-call-next-method)))
+  (plist-get (cdr project) :root))
 
 (cl-defmethod project-ignores ((project (head cloth-project)) _dir)
-  (append (cloth/project/config-ignored-paths (cloth/project/get-config project))
-          (cl-call-next-method)))
+  (append
+   (plist-get (plist-get (cdr project) :metadata) :ignored)
+   (cl-call-next-method)))
 
-;;; hook
-(add-hook 'project-find-functions
-          #'cloth/project/find
-          t)
+(cl-defmethod project-files ((project (head cloth-project)) &optional dirs)
+  (let* ((project-files-relative-names nil)
+         (files (cl-call-next-method))
+         (root (project-root project))
+         (included (plist-get (plist-get (cdr project) :metadata) :included)))
+    (dolist (included-path included)
+      (let* ((path (expand-file-name included-path root))
+             (included-files (cond ((file-regular-p path) (list path))
+                                   ((file-directory-p path) (directory-files-recursively path "")))))
+        (dolist (included-file included-files)
+          (when (and (file-regular-p included-file)
+                     (seq-some
+                      (lambda (dir)
+                        (file-in-directory-p included-file dir))
+                      (or dirs (list root))))
+            (push included-file files)))))
+    (delete-dups files)))
+
+(add-hook 'project-find-functions #'cloth/project/find-project)
 
 (provide 'cloth-project)
